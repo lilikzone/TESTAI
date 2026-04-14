@@ -127,3 +127,74 @@ def format_response(
         )
     except Exception as e:
         return f"[Formatter unavailable: {str(e)}]\n\nRaw output:\n{raw_output}"
+
+
+# --------------------------------------------------------------------------- #
+# Multi-output analyzer
+# --------------------------------------------------------------------------- #
+
+_ANALYZE_RESULTS_PROMPT = """\
+You are a senior cloud engineer.
+You are given multiple AWS CLI outputs.
+Analyze and provide:
+- Overall summary
+- Health status
+- Risks
+- Recommendations
+
+Be specific, use numbers, avoid generic text.
+Respond entirely in Bahasa Indonesia.
+
+AWS CLI outputs:
+{combined_outputs}"""
+
+
+def analyze_results(all_results: list[str]) -> str:
+    """
+    Analyze multiple sanitized AWS CLI outputs and return a final insight.
+
+    Args:
+        all_results: List of sanitized AWS CLI output strings.
+
+    Returns:
+        str: Final AI-generated insight covering summary, health,
+             risks, and recommendations.
+
+    Raises:
+        RuntimeError: If Bedrock invocation fails.
+    """
+    if not all_results:
+        return "Tidak ada output yang diterima untuk dianalisis."
+
+    # Combine all outputs with numbered labels
+    combined = ""
+    for i, output in enumerate(all_results, 1):
+        preview = output.strip()[:1500]
+        if len(output.strip()) > 1500:
+            preview += "\n... [truncated]"
+        combined += f"\n--- Output {i} ---\n{preview}\n"
+
+    prompt = _ANALYZE_RESULTS_PROMPT.format(combined_outputs=combined)
+
+    region  = os.getenv("BEDROCK_REGION", "us-east-1")
+    profile = os.getenv("AWS_PROFILE", "sandbox")
+    session = boto3.Session(profile_name=profile, region_name=region)
+    client  = session.client("bedrock-runtime")
+
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+    })
+
+    try:
+        response = client.invoke_model(
+            modelId=_BEDROCK_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=body,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Bedrock invocation failed: {str(e)}")
+
+    return json.loads(response["body"].read())["content"][0]["text"].strip()

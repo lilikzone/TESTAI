@@ -7,6 +7,7 @@ Orchestrator — Runs a full AI agent loop:
 """
 
 from backend.services import ai_service, cli_executor
+from backend.services.formatter import analyze_results
 from backend.services.planner import plan_actions
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
@@ -70,10 +71,12 @@ def run_ai_agent(user_input: str) -> dict:
         executed_steps.append(step_result)
 
     # Step 3 — Analyze all results
-    final_answer = ai_service.analyze(
-        user_input=user_input,
-        steps=executed_steps,
-    )
+    successful_outputs = [s["output"] for s in executed_steps if s["success"] and s["output"]]
+
+    if successful_outputs:
+        final_answer = analyze_results(successful_outputs)
+    else:
+        final_answer = ai_service.analyze(user_input=user_input, steps=executed_steps)
 
     return {
         "steps":        executed_steps,
