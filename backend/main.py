@@ -16,6 +16,7 @@ from backend.services.planner import plan_actions
 from backend.services.orchestrator import run_ai_agent
 from backend.ai.planner import create_plan
 from backend.ai.executor import execute_plan, execute_approved
+from backend.ai.remediator import sign_actions
 
 load_dotenv()
 

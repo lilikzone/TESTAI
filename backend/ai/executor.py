@@ -19,6 +19,7 @@ from backend.ai.safe_commands import is_blocked, is_safe
 from backend.services.cli_executor import run_cli
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
+import hashlib
 
 # Shell injection characters that must never appear in any command
 _FORBIDDEN_CHARS = [";", "&&", "|", "`", "$(", ">", "<"]
@@ -148,7 +149,18 @@ def execute_approved(actions: list[dict]) -> dict:
         command     = action.get("command", "").strip()
         risk        = action.get("risk", "unknown")
 
-        base = {"description": description, "command": command, "risk": risk}
+        base = {"description": description, "command": command, "risk": risk,
+                "action_id": action.get("action_id", ""), "hash": action.get("hash", "")}
+
+        # Layer 0 — verify hash matches command (tamper detection)
+        expected_hash = action.get("hash", "")
+        if expected_hash:
+            actual_hash = hashlib.sha256(command.encode()).hexdigest()
+            if actual_hash != expected_hash:
+                executed.append({**base,
+                    "result": "Rejected: hash mismatch — command may have been tampered with.",
+                    "success": False})
+                continue
 
         # Layer 1 — must be an AWS CLI command
         if not command.startswith("aws "):

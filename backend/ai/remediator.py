@@ -18,8 +18,10 @@ Safe list policy:
     No delete, terminate, remove, or destructive operations.
 """
 
+import hashlib
 import json
 import os
+import uuid
 
 import boto3
 
@@ -155,3 +157,31 @@ def generate_remediation(analysis: str) -> dict:
         safe_actions.append(action)
 
     return {"actions": safe_actions}
+
+
+def _sign_action(action: dict) -> dict:
+    """
+    Add action_id (UUID) and hash (SHA256 of command) to an action dict.
+    Used to verify integrity on /ai/approve — prevents tampering.
+    """
+    command = action.get("command", "")
+    return {
+        **action,
+        "action_id": str(uuid.uuid4()),
+        "hash":      hashlib.sha256(command.encode()).hexdigest(),
+    }
+
+
+def sign_actions(result: dict) -> dict:
+    """
+    Sign all actions in a remediation result with action_id and hash.
+
+    Args:
+        result: Output from generate_remediation() — {"actions": [...]}
+
+    Returns:
+        Same structure with each action enriched with action_id and hash.
+    """
+    return {
+        "actions": [_sign_action(a) for a in result.get("actions", [])]
+    }
