@@ -17,6 +17,60 @@ class ExecuteResult:
     return_code: int
 
 
+def run_cli(command: str) -> dict:
+    """
+    Execute an AWS CLI command and return a plain dict result.
+
+    Args:
+        command: Full AWS CLI command string (e.g. "aws s3 ls")
+
+    Returns:
+        dict with keys:
+            success (bool)  — True if exit code is 0
+            output  (str)   — stdout from the command
+            error   (str)   — stderr or error message, empty string if none
+    """
+    if not command.startswith("aws "):
+        return {
+            "success": False,
+            "output": "",
+            "error": "Invalid command: only 'aws' CLI commands are permitted.",
+        }
+
+    try:
+        args = shlex.split(command)
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        success = result.returncode == 0
+        return {
+            "success": success,
+            "output": result.stdout.strip(),
+            "error": result.stderr.strip() if not success else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "output": "",
+            "error": "Command timed out after 10 seconds.",
+        }
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "output": "",
+            "error": "AWS CLI is not installed or not found in PATH.",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "output": "",
+            "error": f"Unexpected error: {str(e)}",
+        }
+
+
 def execute(command: str, timeout: int = 60) -> ExecuteResult:
     """
     Execute a validated AWS CLI command as a subprocess.
