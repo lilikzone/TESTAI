@@ -17,6 +17,7 @@ from backend.services.orchestrator import run_ai_agent
 from backend.ai.planner import create_plan
 from backend.ai.executor import execute_plan, execute_approved
 from backend.ai.remediator import sign_actions
+from backend.ai.audit import get_recent_logs
 
 load_dotenv()
 
@@ -197,3 +198,10 @@ def approve(request: ApproveRequest):
     except Exception as e:
         _log("ERROR", f"Approved execution failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/ai/audit")
+def audit_log(n: int = 50):
+    """Return the last N audit log entries."""
+    _log("INFO", f"Audit log requested (last {n} entries)")
+    return {"entries": get_recent_logs(n)}

@@ -16,6 +16,7 @@ Two modes:
 """
 
 from backend.ai.safe_commands import is_blocked, is_safe
+from backend.ai.audit import log_action
 from backend.services.cli_executor import run_cli
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
@@ -103,11 +104,19 @@ def execute_plan(steps: list[dict], remediation_actions: list[dict] | None = Non
             continue
 
         raw = run_cli(command)
+        result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
+
+        log_action(
+            user="system",
+            command=command,
+            result=result_text,
+            status="success" if raw["success"] else "failed",
+        )
 
         executed.append({
             "step":    step_num,
             "command": command,
-            "result":  sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"],
+            "result":  result_text,
             "success": raw["success"],
         })
 
@@ -157,9 +166,10 @@ def execute_approved(actions: list[dict]) -> dict:
         if expected_hash:
             actual_hash = hashlib.sha256(command.encode()).hexdigest()
             if actual_hash != expected_hash:
-                executed.append({**base,
-                    "result": "Rejected: hash mismatch — command may have been tampered with.",
-                    "success": False})
+                msg = "Rejected: hash mismatch — command may have been tampered with."
+                log_action(user="system", command=command, result=msg, status="rejected",
+                           action_id=action.get("action_id", ""), hash=expected_hash)
+                executed.append({**base, "result": msg, "success": False})
                 continue
 
         # Layer 1 — must be an AWS CLI command
@@ -192,9 +202,20 @@ def execute_approved(actions: list[dict]) -> dict:
 
         # All checks passed — execute
         raw = run_cli(command)
+        result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
+
+        log_action(
+            user="system",
+            command=command,
+            result=result_text,
+            status="success" if raw["success"] else "failed",
+            action_id=action.get("action_id", ""),
+            hash=action.get("hash", ""),
+        )
+
         executed.append({
             **base,
-            "result":  sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"],
+            "result":  result_text,
             "success": raw["success"],
         })
 
