@@ -17,6 +17,7 @@ Two modes:
 
 from backend.ai.safe_commands import is_blocked, is_safe
 from backend.ai.audit import log_action
+from backend.ai.rbac import check_permission
 from backend.services.cli_executor import run_cli
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
@@ -123,7 +124,7 @@ def execute_plan(steps: list[dict], remediation_actions: list[dict] | None = Non
     return {"steps": executed}
 
 
-def execute_approved(actions: list[dict]) -> dict:
+def execute_approved(actions: list[dict], user: str = "system", role: str = "operator") -> dict:
     """
     Execute remediation actions after explicit user approval.
 
@@ -161,13 +162,22 @@ def execute_approved(actions: list[dict]) -> dict:
         base = {"description": description, "command": command, "risk": risk,
                 "action_id": action.get("action_id", ""), "hash": action.get("hash", "")}
 
+        # Layer -1 — RBAC check
+        allowed, reason = check_permission(role, action)
+        if not allowed:
+            msg = f"Rejected: {reason}"
+            log_action(user=user, command=command, result=msg, status="rejected",
+                       action_id=action.get("action_id", ""), hash=action.get("hash", ""))
+            executed.append({**base, "result": msg, "success": False})
+            continue
+
         # Layer 0 — verify hash matches command (tamper detection)
         expected_hash = action.get("hash", "")
         if expected_hash:
             actual_hash = hashlib.sha256(command.encode()).hexdigest()
             if actual_hash != expected_hash:
                 msg = "Rejected: hash mismatch — command may have been tampered with."
-                log_action(user="system", command=command, result=msg, status="rejected",
+                log_action(user=user, command=command, result=msg, status="rejected",
                            action_id=action.get("action_id", ""), hash=expected_hash)
                 executed.append({**base, "result": msg, "success": False})
                 continue
@@ -205,7 +215,7 @@ def execute_approved(actions: list[dict]) -> dict:
         result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
 
         log_action(
-            user="system",
+            user=user,
             command=command,
             result=result_text,
             status="success" if raw["success"] else "failed",

@@ -75,6 +75,8 @@ class AgentResponse(BaseModel):
 
 class ApproveRequest(BaseModel):
     actions: list[dict]
+    user: str = "system"
+    role: str = "operator"
 
 
 class ApproveResponse(BaseModel):
@@ -192,8 +194,8 @@ def approve(request: ApproveRequest):
     _log("INFO", f"Approval received for {len(request.actions)} actions")
 
     try:
-        result = execute_approved(request.actions)
-        _log("INFO", f"Approved execution completed: {len(result['steps'])} steps")
+        result = execute_approved(request.actions, user=request.user, role=request.role)
+        _log("INFO", f"Approved execution completed: {len(result['steps'])} steps (user={request.user}, role={request.role})")
         return ApproveResponse(steps=result["steps"])
     except Exception as e:
         _log("ERROR", f"Approved execution failed: {e}")
