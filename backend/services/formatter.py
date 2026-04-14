@@ -1,5 +1,5 @@
 """
-Formatter Service — Summarizes AWS CLI output using AWS Bedrock.
+Formatter Service — Analyzes sanitized AWS CLI output using AWS Bedrock.
 """
 
 import json
@@ -10,70 +10,24 @@ import boto3
 
 from backend.services import ai_service
 
-_MAX_INPUT_CHARS = 4000
+_MAX_INPUT_CHARS = 2000
 _BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
-_FORMAT_RESULT_PROMPT = """\
-You are a senior cloud engineer.
-Analyze AWS CLI output and give:
-- Summary (what resources exist)
-- Status (UP/DOWN/ISSUE)
-- Risk (if any)
-- Recommendation (actionable)
 
-Be specific. Do NOT give generic advice. Mention numbers (count, status, etc).
-
-Pay special attention to these fields if present:
-- VpnConnections: list all VPN connections with their State and Name tag
-- VgwTelemetry: report each tunnel's Status (UP/DOWN), AcceptedRouteCount, and OutsideIpAddress
-
-IMPORTANT: Respond entirely in Bahasa Indonesia.
-
-AWS CLI output:
-{raw_output}
-"""
-
-
-def format_result(raw_output: str) -> str:
-    """
-    Summarize raw AWS CLI output using AWS Bedrock (Claude 3 Haiku).
-
-    Input is truncated to 2000 characters before being sent to the model
-    to control token usage.
-
-    Args:
-        raw_output: Raw stdout string from an AWS CLI command.
-
-    Returns:
-        str: Plain-language summary covering status, issues, and recommendations.
-
-    Raises:
-        RuntimeError: If Bedrock invocation fails.
-    """
-    if not raw_output or not raw_output.strip():
-        return "No output returned from AWS CLI."
-
-    # Limit input to max 2000 characters
-    truncated = raw_output.strip()[:_MAX_INPUT_CHARS]
-    if len(raw_output.strip()) > _MAX_INPUT_CHARS:
-        truncated += "\n... [output truncated]"
-
-    prompt = _FORMAT_RESULT_PROMPT.format(raw_output=truncated)
-
-    # Bedrock Claude models are available in us-east-1
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-east-1")
+def _get_bedrock_client():
+    region  = os.getenv("BEDROCK_REGION", "us-east-1")
     profile = os.getenv("AWS_PROFILE", "sandbox")
-    session = boto3.Session(profile_name=profile, region_name=bedrock_region)
-    client = session.client("bedrock-runtime")
+    session = boto3.Session(profile_name=profile, region_name=region)
+    return session.client("bedrock-runtime")
 
+
+def _invoke_bedrock(prompt: str, max_tokens: int = 800) -> str:
+    client = _get_bedrock_client()
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 500,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
     })
-
     try:
         response = client.invoke_model(
             modelId=_BEDROCK_MODEL_ID,
@@ -83,54 +37,71 @@ def format_result(raw_output: str) -> str:
         )
     except Exception as e:
         raise RuntimeError(f"Bedrock invocation failed: {str(e)}")
-
-    result = json.loads(response["body"].read())
-    return result["content"][0]["text"].strip()
+    return json.loads(response["body"].read())["content"][0]["text"].strip()
 
 
 # --------------------------------------------------------------------------- #
-# Pipeline helper — used by main.py full pipeline
+# format_result — primary function used by /ai/chat pipeline
 # --------------------------------------------------------------------------- #
 
-def _extract_service(command: str) -> str:
-    """Extract AWS service name from a CLI command string."""
-    match = re.match(r"aws\s+(\S+)", command)
-    return match.group(1) if match else "aws"
+_FORMAT_RESULT_PROMPT = """\
+You are a senior AWS cloud engineer.
+Analyze the AWS CLI output and provide:
+
+Summary:
+- What resources exist (count, type)
+
+Status:
+- Are they UP / DOWN / HEALTHY
+
+Risks:
+- Misconfiguration
+- Missing logging
+- Weak security
+
+Recommendations:
+- Clear and actionable steps
+
+Rules:
+- Be specific (include numbers)
+- Do NOT be generic
+- Do NOT repeat raw data
+- Answer in Bahasa Indonesia
+
+AWS CLI output:
+{clean_output}"""
 
 
-def format_response(
-    raw_output: str,
-    original_query: str,
-    executed_command: str,
-) -> str:
+def format_result(clean_output: str) -> str:
     """
-    Format raw AWS output into a human-readable summary (full pipeline variant).
+    Analyze sanitized AWS CLI output and return a senior cloud engineer insight.
+
+    Input is capped at 2000 characters. Returns clean text — no JSON.
 
     Args:
-        raw_output:       stdout from cli_executor
-        original_query:   the user's original natural language query
-        executed_command: the AWS CLI command that was run
+        clean_output: Sanitized AWS CLI output string (from sanitizer.py).
 
     Returns:
-        str: Formatted, user-friendly summary with optional recommendations
+        str: Analysis covering summary, status, risks, and recommendations
+             in Bahasa Indonesia.
+
+    Raises:
+        RuntimeError: If Bedrock invocation fails.
     """
-    if not raw_output or raw_output.strip() == "":
-        return "The command executed successfully but returned no output."
+    if not clean_output or not clean_output.strip():
+        return "Tidak ada output yang diterima dari AWS CLI."
 
-    aws_service_name = _extract_service(executed_command)
+    # Cap input at 2000 characters
+    truncated = clean_output.strip()[:_MAX_INPUT_CHARS]
+    if len(clean_output.strip()) > _MAX_INPUT_CHARS:
+        truncated += "\n... [output truncated]"
 
-    try:
-        return ai_service.format_output(
-            raw_output=raw_output,
-            original_query=original_query,
-            aws_service=aws_service_name,
-        )
-    except Exception as e:
-        return f"[Formatter unavailable: {str(e)}]\n\nRaw output:\n{raw_output}"
+    prompt = _FORMAT_RESULT_PROMPT.format(clean_output=truncated)
+    return _invoke_bedrock(prompt, max_tokens=800)
 
 
 # --------------------------------------------------------------------------- #
-# Multi-output analyzer
+# analyze_results — used by orchestrator for multi-step analysis
 # --------------------------------------------------------------------------- #
 
 _ANALYZE_RESULTS_PROMPT = """\
@@ -157,16 +128,11 @@ def analyze_results(all_results: list[str]) -> str:
         all_results: List of sanitized AWS CLI output strings.
 
     Returns:
-        str: Final AI-generated insight covering summary, health,
-             risks, and recommendations.
-
-    Raises:
-        RuntimeError: If Bedrock invocation fails.
+        str: Final AI-generated insight in Bahasa Indonesia.
     """
     if not all_results:
         return "Tidak ada output yang diterima untuk dianalisis."
 
-    # Combine all outputs with numbered labels
     combined = ""
     for i, output in enumerate(all_results, 1):
         preview = output.strip()[:3000]
@@ -175,26 +141,29 @@ def analyze_results(all_results: list[str]) -> str:
         combined += f"\n--- Output {i} ---\n{preview}\n"
 
     prompt = _ANALYZE_RESULTS_PROMPT.format(combined_outputs=combined)
+    return _invoke_bedrock(prompt, max_tokens=1024)
 
-    region  = os.getenv("BEDROCK_REGION", "us-east-1")
-    profile = os.getenv("AWS_PROFILE", "sandbox")
-    session = boto3.Session(profile_name=profile, region_name=region)
-    client  = session.client("bedrock-runtime")
 
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-    })
+# --------------------------------------------------------------------------- #
+# format_response — used by /ai/chat full pipeline variant
+# --------------------------------------------------------------------------- #
 
+def _extract_service(command: str) -> str:
+    match = re.match(r"aws\s+(\S+)", command)
+    return match.group(1) if match else "aws"
+
+
+def format_response(raw_output: str, original_query: str, executed_command: str) -> str:
+    """Format raw AWS output using the prompt-file based ai_service pipeline."""
+    if not raw_output or raw_output.strip() == "":
+        return "The command executed successfully but returned no output."
+
+    aws_service_name = _extract_service(executed_command)
     try:
-        response = client.invoke_model(
-            modelId=_BEDROCK_MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=body,
+        return ai_service.format_output(
+            raw_output=raw_output,
+            original_query=original_query,
+            aws_service=aws_service_name,
         )
     except Exception as e:
-        raise RuntimeError(f"Bedrock invocation failed: {str(e)}")
-
-    return json.loads(response["body"].read())["content"][0]["text"].strip()
+        return f"[Formatter unavailable: {str(e)}]\n\nRaw output:\n{raw_output}"
