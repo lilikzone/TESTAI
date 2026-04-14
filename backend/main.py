@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from backend.services import ai_service, cli_executor, formatter
 from backend.services.sanitizer import sanitize_aws_output
 from backend.services.planner import plan_actions
+from backend.services.orchestrator import run_ai_agent
 from backend.utils.security import is_safe_command
 
 load_dotenv()
@@ -61,6 +62,15 @@ class PlanRequest(BaseModel):
 
 class PlanResponse(BaseModel):
     steps: list[dict]
+
+
+class AgentRequest(BaseModel):
+    message: str
+
+
+class AgentResponse(BaseModel):
+    steps: list[dict]
+    final_answer: str
 
 
 # --------------------------------------------------------------------------- #
@@ -168,4 +178,25 @@ def plan(request: PlanRequest):
         return PlanResponse(steps=result["steps"])
     except (RuntimeError, ValueError) as e:
         _log("ERROR", f"Planner failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/ai/agent", response_model=AgentResponse)
+def agent(request: AgentRequest):
+    """
+    Full AI agent endpoint.
+    Plans, executes, sanitizes, and analyzes AWS operations autonomously.
+    """
+    message = request.message.strip()
+    _log("INFO", f"Agent request: {message}")
+
+    try:
+        result = run_ai_agent(message)
+        _log("INFO", f"Agent completed: {len(result['steps'])} steps executed")
+        return AgentResponse(
+            steps=result["steps"],
+            final_answer=result["final_answer"],
+        )
+    except Exception as e:
+        _log("ERROR", f"Agent failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))

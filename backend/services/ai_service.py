@@ -154,3 +154,44 @@ def format_output(raw_output: str, original_query: str, aws_service: str = "aws"
         raw_output=raw_output,
     )
     return _invoke(prompt, max_tokens=500)
+
+
+def analyze(user_input: str, steps: list[dict]) -> str:
+    """
+    Synthesize results from multiple executed AWS CLI steps into a final answer.
+
+    Args:
+        user_input: The original user request for context.
+        steps:      List of executed steps with description, command,
+                    success flag, output, and error.
+
+    Returns:
+        str: Final AI-generated analysis in Bahasa Indonesia.
+    """
+    steps_summary = ""
+    for i, step in enumerate(steps, 1):
+        steps_summary += f"\nStep {i}: {step['description']}\n"
+        steps_summary += f"  Command: {step['command']}\n"
+        if step["success"]:
+            output_preview = step["output"][:1000] + ("..." if len(step["output"]) > 1000 else "")
+            steps_summary += f"  Output: {output_preview}\n"
+        else:
+            steps_summary += f"  Error: {step['error']}\n"
+
+    prompt = f"""\
+You are a senior AWS cloud engineer.
+The user asked: "{user_input}"
+
+The following AWS CLI steps were executed:
+{steps_summary}
+
+Analyze all results and provide a final answer in Bahasa Indonesia covering:
+- Ringkasan keseluruhan (what was found across all steps)
+- Status (any issues or errors)
+- Risiko (if any)
+- Rekomendasi (specific and actionable)
+
+Be specific. Mention resource names, counts, IPs, and statuses.
+Do NOT give generic advice."""
+
+    return _invoke(prompt, max_tokens=1024)
