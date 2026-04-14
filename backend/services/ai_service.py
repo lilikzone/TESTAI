@@ -1,18 +1,23 @@
 """
-AI Service — Gemini integration for translation and formatting.
+AI Service — AWS Bedrock integration for CLI translation and output formatting.
 Handles three responsibilities:
-  1. generate_cli()   — natural language → AWS CLI command (simple, direct)
+  1. generate_cli()   — natural language → AWS CLI command (direct, simple)
   2. translate()      — natural language → AWS CLI command (prompt-file based)
   3. format_output()  — raw AWS JSON → human-readable summary
 """
 
+import json
 import os
 import re
 from pathlib import Path
 
-import google.generativeai as genai
+import boto3
 
-# Load prompts once at module level
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
+_BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 
 _GENERATE_CLI_SYSTEM_PROMPT = (
@@ -26,36 +31,71 @@ _GENERATE_CLI_SYSTEM_PROMPT = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Internal helpers
+# --------------------------------------------------------------------------- #
+
+def _get_bedrock_client():
+    region = os.getenv("AWS_REGION", "ap-southeast-3")
+    return boto3.client("bedrock-runtime", region_name=region)
+
+
+def _invoke(prompt: str, max_tokens: int = 200) -> str:
+    """
+    Send a prompt to Bedrock Claude and return the response text.
+
+    Args:
+        prompt:     Full prompt string to send as user message.
+        max_tokens: Maximum tokens in the response.
+
+    Returns:
+        str: Raw text response from the model.
+
+    Raises:
+        RuntimeError: If the Bedrock invocation fails for any reason.
+    """
+    client = _get_bedrock_client()
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": max_tokens,
+    })
+
+    try:
+        response = client.invoke_model(
+            modelId=_BEDROCK_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=body,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Bedrock invocation failed: {str(e)}")
+
+    result = json.loads(response["body"].read())
+    return result["content"][0]["text"].strip()
+
+
 def _load_prompt(filename: str) -> str:
     return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
-def _get_client() -> genai.GenerativeModel:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY is not set in environment variables.")
-    genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    return genai.GenerativeModel(model_name)
-
-
 def _clean_command(text: str) -> str:
-    """Strip whitespace, markdown fences, and ensure output is a single clean line."""
+    """Strip whitespace, markdown fences, and collapse to a single clean line."""
     text = text.strip()
-    # Remove markdown code fences (```bash ... ``` or ``` ... ```)
     text = re.sub(r"^```[a-z]*\n?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\n?```$", "", text)
-    # Collapse internal newlines/extra spaces into a single line
-    text = " ".join(text.split())
-    return text
+    return " ".join(text.split())
 
+
+# --------------------------------------------------------------------------- #
+# Public functions
+# --------------------------------------------------------------------------- #
 
 def generate_cli(user_input: str) -> str:
     """
-    Convert a natural language request into an AWS CLI command.
-
-    Uses a concise system prompt that instructs Gemini to output
-    only the command — no explanation, no markdown, no extra text.
+    Convert a natural language request into an AWS CLI command via Bedrock.
 
     Args:
         user_input: Plain language description of the desired AWS operation.
@@ -64,20 +104,15 @@ def generate_cli(user_input: str) -> str:
         str: A clean, single-line AWS CLI command string.
 
     Raises:
-        EnvironmentError: If GEMINI_API_KEY is not set.
-        ValueError: If Gemini returns an empty or non-AWS response.
+        RuntimeError: If Bedrock invocation fails.
+        ValueError:   If the model returns an empty or non-AWS response.
     """
-    model = _get_client()
     prompt = f"{_GENERATE_CLI_SYSTEM_PROMPT}\n\nUser request: {user_input}"
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        raise RuntimeError(f"Gemini failed to generate a response: {str(e)}")
-
-    command = _clean_command(response.text)
+    raw = _invoke(prompt, max_tokens=200)
+    command = _clean_command(raw)
 
     if not command:
-        raise ValueError("Gemini returned an empty response.")
+        raise ValueError("Bedrock returned an empty response.")
     if not command.startswith("aws "):
         raise ValueError(f"Unexpected response from AI (not an AWS command): {command}")
 
@@ -86,7 +121,8 @@ def generate_cli(user_input: str) -> str:
 
 def translate(query: str, aws_region: str, account_id: str = "unknown") -> str:
     """
-    Translate a natural language query into an AWS CLI command string.
+    Translate a natural language query into an AWS CLI command string
+    using the full prompt template from prompts/translator.txt.
 
     Returns:
         str: AWS CLI command, or a string starting with CLARIFY: / UNSUPPORTED:
@@ -97,12 +133,7 @@ def translate(query: str, aws_region: str, account_id: str = "unknown") -> str:
         aws_region=aws_region,
         account_id=account_id,
     )
-    model = _get_client()
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        raise RuntimeError(f"Gemini failed to translate query: {str(e)}")
-    return response.text.strip()
+    return _invoke(prompt, max_tokens=300)
 
 
 def format_output(raw_output: str, original_query: str, aws_service: str = "aws") -> str:
@@ -118,9 +149,4 @@ def format_output(raw_output: str, original_query: str, aws_service: str = "aws"
         aws_service=aws_service,
         raw_output=raw_output,
     )
-    model = _get_client()
-    try:
-        response = model.generate_content(prompt)
-    except Exception as e:
-        raise RuntimeError(f"Gemini failed to format output: {str(e)}")
-    return response.text.strip()
+    return _invoke(prompt, max_tokens=500)

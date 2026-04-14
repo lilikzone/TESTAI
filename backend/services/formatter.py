@@ -1,13 +1,9 @@
 """
 Formatter Service — Orchestrates the output formatting step.
-Wraps ai_service.format_output() with error handling and
-extracts the AWS service name from the executed command.
+Uses Bedrock via ai_service for both format_result() and format_response().
 """
 
-import os
 import re
-
-import google.generativeai as genai
 
 from backend.services import ai_service
 
@@ -25,10 +21,9 @@ _FORMAT_RESULT_PROMPT = (
 
 def format_result(raw_output: str) -> str:
     """
-    Summarize raw AWS CLI output using Gemini.
+    Summarize raw AWS CLI output using Bedrock.
 
-    Input is truncated to 2000 characters before being sent to the model
-    to avoid excessive token usage.
+    Input is truncated to 2000 characters before being sent to the model.
 
     Args:
         raw_output: Raw stdout string from an AWS CLI command.
@@ -39,25 +34,15 @@ def format_result(raw_output: str) -> str:
     if not raw_output or not raw_output.strip():
         return "No output returned from AWS CLI."
 
-    # Limit input to max 2000 characters
     truncated = raw_output.strip()[:_MAX_INPUT_CHARS]
     if len(raw_output.strip()) > _MAX_INPUT_CHARS:
         truncated += "\n... [output truncated]"
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY is not set in environment variables.")
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
-
     prompt = _FORMAT_RESULT_PROMPT.format(raw_output=truncated)
     try:
-        response = model.generate_content(prompt)
+        return ai_service._invoke(prompt, max_tokens=500)
     except Exception as e:
-        raise RuntimeError(f"Gemini failed to format the output: {str(e)}")
-
-    return response.text.strip()
+        raise RuntimeError(f"Bedrock failed to format the output: {str(e)}")
 
 
 def _extract_service(command: str) -> str:
@@ -94,5 +79,4 @@ def format_response(
             aws_service=aws_service,
         )
     except Exception as e:
-        # Fallback: return raw output if Gemini fails
         return f"[Formatter unavailable: {str(e)}]\n\nRaw output:\n{raw_output}"
