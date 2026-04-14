@@ -167,3 +167,73 @@ def format_response(raw_output: str, original_query: str, executed_command: str)
         )
     except Exception as e:
         return f"[Formatter unavailable: {str(e)}]\n\nRaw output:\n{raw_output}"
+
+
+# --------------------------------------------------------------------------- #
+# format_steps — accepts multi-step executor output
+# --------------------------------------------------------------------------- #
+
+_FORMAT_STEPS_PROMPT = """\
+You are a senior AWS cloud engineer.
+You are given results from multiple AWS CLI commands executed in sequence.
+Correlate the data across all steps and provide a unified analysis.
+
+Structure your response exactly as:
+
+**Ringkasan**
+(What was found across all steps — resource names, counts, types)
+
+**Status**
+(Health of each resource — UP/DOWN/HEALTHY/ISSUE with specific values)
+
+**Risiko**
+(Misconfigurations, missing logging, weak security, or anomalies found)
+
+**Rekomendasi**
+(Specific, actionable steps — reference actual resource names/IDs)
+
+Rules:
+- Correlate data across steps (e.g. VPN state + CloudWatch metrics together)
+- Do NOT repeat raw CLI output or JSON
+- Be concise and specific — use numbers, names, IPs
+- Answer entirely in Bahasa Indonesia
+
+Step results:
+{steps_summary}"""
+
+
+def format_steps(steps: list[dict]) -> str:
+    """
+    Analyze multi-step executor results and return a unified cloud engineer insight.
+
+    Accepts the output of backend/ai/executor.execute_plan() directly.
+
+    Args:
+        steps: List of executed step dicts, each with:
+               step (int), command (str), result (str), success (bool)
+
+    Returns:
+        str: Unified analysis in Bahasa Indonesia covering summary,
+             status, risks, and recommendations correlated across all steps.
+
+    Raises:
+        RuntimeError: If Bedrock invocation fails.
+    """
+    if not steps:
+        return "Tidak ada hasil eksekusi yang diterima."
+
+    # Build a concise summary of each step for the prompt
+    steps_summary = ""
+    for s in steps:
+        steps_summary += f"\nStep {s['step']}: {s['command']}\n"
+        if s["success"]:
+            # Trim per-step result to avoid token overflow
+            preview = s["result"].strip()[:1500]
+            if len(s["result"].strip()) > 1500:
+                preview += "\n... [truncated]"
+            steps_summary += f"Output:\n{preview}\n"
+        else:
+            steps_summary += f"Error: {s['result']}\n"
+
+    prompt = _FORMAT_STEPS_PROMPT.format(steps_summary=steps_summary)
+    return _invoke_bedrock(prompt, max_tokens=1024)
