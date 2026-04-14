@@ -138,5 +138,5 @@ def chat(request: ChatRequest):
     return ChatResponse(
         command=command,
         answer=answer,
-        raw=result["output"],
+        raw=sanitized,
     )
