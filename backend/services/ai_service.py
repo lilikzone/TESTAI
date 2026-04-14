@@ -27,7 +27,10 @@ _GENERATE_CLI_SYSTEM_PROMPT = (
     "- No explanation\n"
     "- No markdown formatting\n"
     "- No code blocks\n"
-    "- No extra whitespace or newlines"
+    "- No extra whitespace or newlines\n"
+    "- AWS region mapping: Jakarta=ap-southeast-3, Singapore=ap-southeast-1, "
+    "Virginia=us-east-1, Ireland=eu-west-1, Tokyo=ap-northeast-1, Sydney=ap-southeast-2\n"
+    "- Default region if not specified: ap-southeast-3"
 )
 
 
