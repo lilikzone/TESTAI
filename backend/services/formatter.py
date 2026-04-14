@@ -10,7 +10,7 @@ import boto3
 
 from backend.services import ai_service
 
-_MAX_INPUT_CHARS = 2000
+_MAX_INPUT_CHARS = 4000
 _BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
 _FORMAT_RESULT_PROMPT = """\

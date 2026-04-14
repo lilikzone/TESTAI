@@ -5,7 +5,7 @@ Prevents secrets like PreSharedKey from being sent to Bedrock.
 
 import json
 
-_MAX_OUTPUT_CHARS = 2000
+_MAX_OUTPUT_CHARS = 4000
 
 # Fields to remove recursively from any nested JSON structure
 _SENSITIVE_FIELDS = {"PreSharedKey", "CustomerGatewayConfiguration"}
