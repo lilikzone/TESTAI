@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from backend.services import ai_service, cli_executor, formatter
 from backend.services.sanitizer import sanitize_aws_output
+from backend.services.planner import plan_actions
 from backend.utils.security import is_safe_command
 
 load_dotenv()
@@ -52,6 +53,14 @@ class ChatResponse(BaseModel):
     command: str | None
     answer: str
     raw: str | None = None
+
+
+class PlanRequest(BaseModel):
+    message: str
+
+
+class PlanResponse(BaseModel):
+    steps: list[dict]
 
 
 # --------------------------------------------------------------------------- #
@@ -143,3 +152,20 @@ def chat(request: ChatRequest):
         answer=answer,
         raw=sanitized,
     )
+
+@app.post("/ai/plan", response_model=PlanResponse)
+def plan(request: PlanRequest):
+    """
+    Action planner endpoint.
+    Breaks down a user request into ordered AWS CLI steps.
+    """
+    message = request.message.strip()
+    _log("INFO", f"Plan request: {message}")
+
+    try:
+        result = plan_actions(message)
+        _log("INFO", f"Plan generated: {len(result['steps'])} steps")
+        return PlanResponse(steps=result["steps"])
+    except (RuntimeError, ValueError) as e:
+        _log("ERROR", f"Planner failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
