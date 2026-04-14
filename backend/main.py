@@ -17,6 +17,9 @@ from backend.utils.security import is_safe_command
 
 load_dotenv()
 
+# Log active configuration on startup
+print(f"[CONFIG] AWS_PROFILE={os.getenv('AWS_PROFILE', 'sandbox')} | AWS_REGION={os.getenv('AWS_REGION', 'ap-southeast-3')} | BEDROCK_REGION={os.getenv('BEDROCK_REGION', 'us-east-1')}")
+
 app = FastAPI(
     title="AI Cloud Operator",
     description="Operate AWS using natural language powered by Gemini AI",
