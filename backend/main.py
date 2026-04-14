@@ -15,7 +15,7 @@ from backend.services import formatter
 from backend.services.planner import plan_actions
 from backend.services.orchestrator import run_ai_agent
 from backend.ai.planner import create_plan
-from backend.ai.executor import execute_plan
+from backend.ai.executor import execute_plan, execute_approved
 
 load_dotenv()
 
@@ -69,6 +69,14 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     steps: list[dict]
     final_answer: str
+
+
+class ApproveRequest(BaseModel):
+    actions: list[dict]
+
+
+class ApproveResponse(BaseModel):
+    steps: list[dict]
 
 
 # --------------------------------------------------------------------------- #
@@ -169,4 +177,22 @@ def agent(request: AgentRequest):
         )
     except Exception as e:
         _log("ERROR", f"Agent failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/ai/approve", response_model=ApproveResponse)
+def approve(request: ApproveRequest):
+    """
+    Execute pre-approved remediation actions.
+    Only called when user explicitly confirms with "approve".
+    Each action is re-validated against safe_commands before execution.
+    """
+    _log("INFO", f"Approval received for {len(request.actions)} actions")
+
+    try:
+        result = execute_approved(request.actions)
+        _log("INFO", f"Approved execution completed: {len(result['steps'])} steps")
+        return ApproveResponse(steps=result["steps"])
+    except Exception as e:
+        _log("ERROR", f"Approved execution failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
