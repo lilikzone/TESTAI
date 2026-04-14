@@ -13,6 +13,7 @@ Two modes:
   3. execute_approved(actions)
      — Called only when user explicitly says "approve".
      — Validates each action against safe_commands before executing.
+     — Attempts dry-run first if the command supports it.
 """
 
 from backend.ai.safe_commands import is_blocked, is_safe
@@ -25,6 +26,59 @@ import hashlib
 
 # Shell injection characters that must never appear in any command
 _FORBIDDEN_CHARS = [";", "&&", "|", "`", "$(", ">", "<"]
+
+# EC2 commands that support --dry-run flag
+# AWS only supports --dry-run on a specific subset of EC2 mutating operations
+_DRY_RUN_SUPPORTED = {
+    "aws ec2 start-instances",
+    "aws ec2 stop-instances",
+    "aws ec2 reboot-instances",
+    "aws ec2 terminate-instances",
+    "aws ec2 run-instances",
+    "aws ec2 create-image",
+    "aws ec2 create-snapshot",
+    "aws ec2 create-volume",
+    "aws ec2 attach-volume",
+    "aws ec2 detach-volume",
+    "aws ec2 associate-address",
+    "aws ec2 disassociate-address",
+    "aws ec2 create-tags",
+    "aws ec2 delete-tags",
+    "aws ec2 modify-instance-attribute",
+}
+
+
+def _supports_dry_run(command: str) -> bool:
+    """Return True if the command supports AWS --dry-run flag."""
+    return any(command.startswith(prefix) for prefix in _DRY_RUN_SUPPORTED)
+
+
+def _dry_run(command: str) -> tuple[bool, str]:
+    """
+    Attempt a dry-run of the command by appending --dry-run.
+
+    AWS dry-run returns exit code 255 with error code DryRunOperation
+    if the user HAS permission (meaning the real call would succeed).
+    Any other error means the real call would also fail.
+
+    Returns:
+        tuple[bool, str]: (would_succeed, message)
+    """
+    dry_command = f"{command} --dry-run"
+    result = run_cli(dry_command)
+
+    # DryRunOperation = permission check passed, real call would succeed
+    if "DryRunOperation" in (result.get("error") or "") or \
+       "DryRunOperation" in (result.get("output") or ""):
+        return True, "Dry-run passed: permission check succeeded."
+
+    # UnauthorizedOperation = no permission
+    if "UnauthorizedOperation" in (result.get("error") or ""):
+        return False, "Dry-run failed: insufficient IAM permissions for this action."
+
+    # Other error — real execution would also fail
+    error_msg = result.get("error") or result.get("output") or "Unknown dry-run error."
+    return False, f"Dry-run failed: {error_msg[:200]}"
 
 
 def is_valid_command(command: str) -> bool:
@@ -210,7 +264,16 @@ def execute_approved(actions: list[dict], user: str = "system", role: str = "ope
                 "success": False})
             continue
 
-        # All checks passed — execute
+        # All checks passed — attempt dry-run if supported
+        if _supports_dry_run(command):
+            dry_ok, dry_msg = _dry_run(command)
+            if not dry_ok:
+                log_action(user=user, command=command, result=dry_msg, status="dry-run-failed",
+                           action_id=action.get("action_id", ""), hash=action.get("hash", ""))
+                executed.append({**base, "result": dry_msg, "success": False})
+                continue
+
+        # Real execution
         raw = run_cli(command)
         result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
 
