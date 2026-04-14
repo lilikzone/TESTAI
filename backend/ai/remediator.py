@@ -23,35 +23,9 @@ import os
 
 import boto3
 
+from backend.ai.safe_commands import is_safe, is_blocked
+
 _BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
-
-# Commands allowed in remediation output — prefix-based safe list
-_SAFE_COMMAND_PREFIXES = (
-    "aws ec2 modify-",
-    "aws ec2 enable-",
-    "aws ec2 create-tags",
-    "aws ec2 associate-",
-    "aws logs create-log-group",
-    "aws logs put-retention-policy",
-    "aws cloudwatch put-metric-alarm",
-    "aws cloudwatch enable-alarm-actions",
-    "aws s3api put-bucket-versioning",
-    "aws s3api put-bucket-encryption",
-    "aws s3api put-public-access-block",
-    "aws iam update-account-password-policy",
-    "aws iam tag-",
-    "aws lambda update-function-configuration",
-    "aws rds modify-db-instance",
-    "aws rds modify-db-cluster",
-    "aws sns create-topic",
-    "aws sns subscribe",
-)
-
-# Keywords that must never appear in remediation commands
-_BLOCKED_KEYWORDS = (
-    "delete", "terminate", "remove", "purge", "destroy",
-    "detach", "disassociate", "revoke", "deregister",
-)
 
 _SYSTEM_PROMPT = """\
 You are a senior AWS cloud engineer performing remediation.
@@ -100,16 +74,8 @@ def _get_bedrock_client():
 
 
 def _is_safe_action(command: str) -> bool:
-    """Validate a command against the safe list and blocked keywords."""
-    cmd_lower = command.lower().strip()
-
-    # Must start with a safe prefix
-    if not any(cmd_lower.startswith(prefix) for prefix in _SAFE_COMMAND_PREFIXES):
-        return False
-
-    # Must not contain blocked keywords
-    if any(kw in cmd_lower for kw in _BLOCKED_KEYWORDS):
-        return False
+    """Validate using centralized safe_commands registry."""
+    return is_safe(command) and not is_blocked(command)
 
     return True
 
