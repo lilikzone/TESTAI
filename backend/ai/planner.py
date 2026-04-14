@@ -21,30 +21,20 @@ You are an AWS CLI expert and cloud operations engineer.
 Convert the user request into an ordered execution plan of AWS CLI commands.
 
 Output rules:
-- Return ONLY a valid JSON array
+- Return ONLY a valid JSON array for the CURRENT user request
 - Each item: {"step": <number>, "action": "<aws cli command>"}
 - Maximum 5 steps
 - Only real, valid AWS CLI commands
 - No explanation text outside the JSON
 - No markdown, no code blocks
-- Commands must be directly executable (no placeholders like <VPN_ID>)
+- No placeholders like <VPN_ID> or <vpc_id> — use generic commands without specific IDs
+- Stop after the closing ] — do NOT add more examples or text
 
-Examples:
+Examples (for reference only — do NOT repeat these in output):
+User: "cek VPN connection" → [{"step": 1, "action": "aws ec2 describe-vpn-connections"}]
+User: "list EC2" → [{"step": 1, "action": "aws ec2 describe-instances"}]
 
-User: "cek VPN connection"
-Output:
-[
-  {"step": 1, "action": "aws ec2 describe-vpn-connections"}
-]
-
-User: "kenapa VPN lambat"
-Output:
-[
-  {"step": 1, "action": "aws ec2 describe-vpn-connections"},
-  {"step": 2, "action": "aws cloudwatch list-metrics --namespace AWS/VPN"},
-  {"step": 3, "action": "aws cloudwatch get-metric-statistics --namespace AWS/VPN --metric-name TunnelDataIn --period 3600 --statistics Average --start-time 2024-01-01T00:00:00Z --end-time 2024-01-02T00:00:00Z"},
-  {"step": 4, "action": "aws cloudwatch get-metric-statistics --namespace AWS/VPN --metric-name TunnelDataOut --period 3600 --statistics Average --start-time 2024-01-01T00:00:00Z --end-time 2024-01-02T00:00:00Z"}
-]"""
+Now respond ONLY for the following user request:"""
 
 
 def create_plan(user_message: str) -> list[dict]:
@@ -94,7 +84,12 @@ def create_plan(user_message: str) -> list[dict]:
         raw_text = raw_text.strip()
 
     try:
-        steps = json.loads(raw_text)
+        # Extract only the first JSON array found — ignore anything after it
+        start = raw_text.find("[")
+        end   = raw_text.rfind("]") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON array found in response")
+        steps = json.loads(raw_text[start:end])
     except json.JSONDecodeError as e:
         raise ValueError(f"Model returned invalid JSON: {e}\nRaw: {raw_text}")
 
