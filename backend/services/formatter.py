@@ -13,14 +13,25 @@ from backend.services import ai_service
 _MAX_INPUT_CHARS = 2000
 _BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
-_FORMAT_RESULT_PROMPT = (
-    "You are a cloud engineer. Summarize AWS CLI output into simple explanation. "
-    "Focus on:\n"
-    "- status\n"
-    "- issue\n"
-    "- recommendation\n\n"
-    "AWS CLI output:\n{raw_output}"
-)
+_FORMAT_RESULT_PROMPT = """\
+You are a senior cloud engineer.
+Analyze AWS CLI output and give:
+- Summary (what resources exist)
+- Status (UP/DOWN/ISSUE)
+- Risk (if any)
+- Recommendation (actionable)
+
+Be specific. Do NOT give generic advice. Mention numbers (count, status, etc).
+
+Pay special attention to these fields if present:
+- VpnConnections: list all VPN connections with their State and Name tag
+- VgwTelemetry: report each tunnel's Status (UP/DOWN), AcceptedRouteCount, and OutsideIpAddress
+
+IMPORTANT: Respond entirely in Bahasa Indonesia.
+
+AWS CLI output:
+{raw_output}
+"""
 
 
 def format_result(raw_output: str) -> str:
