@@ -1,15 +1,18 @@
 """
 AI Cloud Operator — Backend Entry Point
-FastAPI server with clean pipeline: validate → translate → execute → format
+FastAPI server with clean pipeline: translate → validate → execute → format
 """
 
 import os
+from datetime import datetime
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.services import ai_service, cli_executor, formatter
-from backend.utils.security import validate
+from backend.utils.security import is_safe_command
 
 load_dotenv()
 
@@ -19,25 +22,40 @@ app = FastAPI(
     version="0.1.0",
 )
 
-AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-3")
+
+# --------------------------------------------------------------------------- #
+# Global error handler
+# --------------------------------------------------------------------------- #
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    _log("ERROR", f"Unhandled exception on {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error.", "detail": str(exc)},
+    )
 
 
 # --------------------------------------------------------------------------- #
-# Request / Response schemas
+# Schemas
 # --------------------------------------------------------------------------- #
 
 class ChatRequest(BaseModel):
-    query: str
-    region: str | None = None
-    confirm: bool = False  # set True to approve DESTRUCTIVE commands
+    message: str
 
 
 class ChatResponse(BaseModel):
-    query: str
     command: str | None
-    risk_level: str
-    output: str
-    requires_confirmation: bool
+    answer: str
+    raw: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def _log(level: str, msg: str):
+    print(f"[{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}] [{level}] {msg}")
 
 
 # --------------------------------------------------------------------------- #
@@ -55,92 +73,65 @@ def chat(request: ChatRequest):
     Main pipeline endpoint.
 
     Flow:
-      1. Translate natural language → AWS CLI command (Gemini)
-      2. Validate command through Guardrail (security)
-      3. Execute command via AWS CLI
-      4. Format raw output into human-readable summary (Gemini)
+      1. Receive message from user
+      2. Generate AWS CLI command via Gemini (ai_service.generate_cli)
+      3. Validate command safety (security.is_safe_command)
+      4. Execute command via AWS CLI (cli_executor.run_cli)
+      5. Format output into human-readable answer (formatter.format_result)
     """
-    region = request.region or AWS_REGION
+    message = request.message.strip()
+    _log("INFO", f"Received message: {message}")
 
-    # Step 1 — Translate
+    # Step 1 — Generate CLI command
     try:
-        command = ai_service.translate(
-            query=request.query,
-            aws_region=region,
-        )
+        command = ai_service.generate_cli(message)
+        _log("INFO", f"Generated command: {command}")
     except EnvironmentError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log("ERROR", f"Environment error: {e}")
+        return ChatResponse(command=None, answer=str(e))
+    except ValueError as e:
+        _log("WARN", f"AI returned unexpected output: {e}")
+        return ChatResponse(command=None, answer=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI translation failed: {str(e)}")
+        _log("ERROR", f"AI translation failed: {e}")
+        return ChatResponse(command=None, answer=f"Failed to generate CLI command: {str(e)}")
 
-    # Handle Gemini returning CLARIFY or UNSUPPORTED
-    if command.startswith("CLARIFY:"):
+    # Step 2 — Security check
+    if not is_safe_command(command):
+        _log("WARN", f"Blocked unsafe command: {command}")
         return ChatResponse(
-            query=request.query,
-            command=None,
-            risk_level="NONE",
-            output=command,
-            requires_confirmation=False,
-        )
-    if command.startswith("UNSUPPORTED:"):
-        return ChatResponse(
-            query=request.query,
-            command=None,
-            risk_level="NONE",
-            output=command,
-            requires_confirmation=False,
-        )
-
-    # Step 2 — Validate
-    validation = validate(command)
-
-    if not validation.allowed and not validation.requires_confirmation:
-        # Hard block
-        return ChatResponse(
-            query=request.query,
             command=command,
-            risk_level=validation.risk_level,
-            output=f"🚫 Blocked: {validation.reason}",
-            requires_confirmation=False,
-        )
-
-    if validation.requires_confirmation and not request.confirm:
-        # Destructive — needs explicit confirm=true
-        return ChatResponse(
-            query=request.query,
-            command=command,
-            risk_level=validation.risk_level,
-            output=(
-                f"⚠️ This command requires confirmation:\n`{command}`\n\n"
-                f"{validation.reason}\n\n"
-                "Resend the request with `\"confirm\": true` to proceed."
+            answer=(
+                "⚠️ Command requires approval before execution.\n"
+                f"Detected potentially destructive operation in: `{command}`\n"
+                "Please review and confirm with your administrator."
             ),
-            requires_confirmation=True,
         )
+
+    _log("INFO", f"Command passed security check (risk: safe)")
 
     # Step 3 — Execute
-    result = cli_executor.execute(command)
+    result = cli_executor.run_cli(command)
+    _log("INFO", f"Execution success={result['success']}")
 
-    if not result.success:
+    if not result["success"]:
+        _log("WARN", f"CLI execution error: {result['error']}")
         return ChatResponse(
-            query=request.query,
             command=command,
-            risk_level=validation.risk_level,
-            output=f"AWS execution error:\n{result.error}",
-            requires_confirmation=False,
+            answer=f"AWS CLI execution failed:\n{result['error']}",
+            raw=result["output"] or None,
         )
 
     # Step 4 — Format
-    summary = formatter.format_response(
-        raw_output=result.output,
-        original_query=request.query,
-        executed_command=command,
-    )
+    try:
+        answer = formatter.format_result(result["output"])
+        _log("INFO", "Response formatted successfully")
+    except Exception as e:
+        _log("ERROR", f"Formatter failed: {e}")
+        answer = result["output"]  # fallback to raw output
 
     return ChatResponse(
-        query=request.query,
         command=command,
-        risk_level=validation.risk_level,
-        output=summary,
-        requires_confirmation=False,
+        answer=answer,
+        raw=result["output"],
     )
