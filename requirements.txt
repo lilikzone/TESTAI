@@ -1,4 +1,12 @@
+# AI Cloud Operator — Dependencies
+# AI engine: AWS Bedrock (Claude 3 Haiku via boto3)
+
+# API framework
 fastapi
 uvicorn
+
+# AWS SDK — used for Bedrock AI engine and AWS CLI execution
 boto3
+
+# Environment variable management
 python-dotenv
