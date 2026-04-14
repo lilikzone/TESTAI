@@ -49,8 +49,11 @@ def format_result(raw_output: str) -> str:
 
     prompt = _FORMAT_RESULT_PROMPT.format(raw_output=truncated)
 
-    region = os.getenv("AWS_REGION", "ap-southeast-3")
-    client = boto3.client("bedrock-runtime", region_name=region)
+    # Bedrock Claude models are available in us-east-1
+    bedrock_region = os.getenv("BEDROCK_REGION", "us-east-1")
+    profile = os.getenv("AWS_PROFILE", "sandbox")
+    session = boto3.Session(profile_name=profile, region_name=bedrock_region)
+    client = session.client("bedrock-runtime")
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",

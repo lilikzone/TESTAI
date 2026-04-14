@@ -4,6 +4,7 @@ Only accepts pre-validated commands from the pipeline.
 Never called directly from routes.
 """
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ def run_cli(command: str) -> dict:
     """
     Execute an AWS CLI command and return a plain dict result.
 
+    Automatically appends --profile from AWS_PROFILE env var (default: sandbox).
+
     Args:
         command: Full AWS CLI command string (e.g. "aws s3 ls")
 
@@ -36,6 +39,11 @@ def run_cli(command: str) -> dict:
             "output": "",
             "error": "Invalid command: only 'aws' CLI commands are permitted.",
         }
+
+    # Inject --profile if not already present
+    profile = os.getenv("AWS_PROFILE", "sandbox")
+    if "--profile" not in command:
+        command = f"{command} --profile {profile}"
 
     try:
         args = shlex.split(command)

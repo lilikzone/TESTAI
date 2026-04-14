@@ -36,8 +36,12 @@ _GENERATE_CLI_SYSTEM_PROMPT = (
 # --------------------------------------------------------------------------- #
 
 def _get_bedrock_client():
-    region = os.getenv("AWS_REGION", "ap-southeast-3")
-    return boto3.client("bedrock-runtime", region_name=region)
+    # Bedrock Claude models are available in us-east-1
+    # AWS CLI operations use AWS_REGION (ap-southeast-3)
+    bedrock_region = os.getenv("BEDROCK_REGION", "us-east-1")
+    profile = os.getenv("AWS_PROFILE", "sandbox")
+    session = boto3.Session(profile_name=profile, region_name=bedrock_region)
+    return session.client("bedrock-runtime")
 
 
 def _invoke(prompt: str, max_tokens: int = 200) -> str:
