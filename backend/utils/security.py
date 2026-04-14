@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 
 # Commands that are always blocked, no exceptions
+BLOCKED_KEYWORDS = ["delete", "terminate", "remove", "shutdown"]
+
 HARD_BLOCKLIST = [
     r"iam\s+delete-account",
     r"organizations\s+delete-organization",
@@ -45,6 +47,23 @@ class ValidationResult:
     risk_level: str  # READ_ONLY | MODIFY | DESTRUCTIVE | BLOCKED
     reason: str | None
     requires_confirmation: bool
+
+
+def is_safe_command(command: str) -> bool:
+    """
+    Check whether a command is safe to execute.
+
+    Performs a case-insensitive scan for blocked keywords.
+    Returns False immediately if any blocked keyword is found.
+
+    Args:
+        command: AWS CLI command string to evaluate.
+
+    Returns:
+        bool: True if no blocked keywords are found, False otherwise.
+    """
+    cmd_lower = command.lower()
+    return not any(keyword in cmd_lower for keyword in BLOCKED_KEYWORDS)
 
 
 def validate(command: str) -> ValidationResult:
