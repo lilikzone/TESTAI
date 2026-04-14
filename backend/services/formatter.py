@@ -169,8 +169,8 @@ def analyze_results(all_results: list[str]) -> str:
     # Combine all outputs with numbered labels
     combined = ""
     for i, output in enumerate(all_results, 1):
-        preview = output.strip()[:1500]
-        if len(output.strip()) > 1500:
+        preview = output.strip()[:3000]
+        if len(output.strip()) > 3000:
             preview += "\n... [truncated]"
         combined += f"\n--- Output {i} ---\n{preview}\n"
 
