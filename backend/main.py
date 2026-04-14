@@ -53,7 +53,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     command: str | None
     answer: str
-    raw: str | None = None
 
 
 class PlanRequest(BaseModel):
@@ -142,7 +141,6 @@ def chat(request: ChatRequest):
         return ChatResponse(
             command=command,
             answer=f"AWS CLI execution failed:\n{result['error']}",
-            raw=result["output"] or None,
         )
 
     # Step 4 — Sanitize before sending to AI
@@ -160,7 +158,6 @@ def chat(request: ChatRequest):
     return ChatResponse(
         command=command,
         answer=answer,
-        raw=sanitized,
     )
 
 @app.post("/ai/plan", response_model=PlanResponse)
