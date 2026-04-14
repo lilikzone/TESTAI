@@ -21,7 +21,9 @@ Return JSON:
 }
 Rules:
 - Max 5 steps
-- Each step must contain a valid AWS CLI command
+- Each step must contain a valid, real AWS CLI command that exists
+- Only use well-known AWS CLI commands (describe-*, list-*, get-*)
+- Do NOT invent commands — if unsure, reuse describe-* commands with different --query filters
 - Be relevant to user request
 - Do NOT explain outside JSON
 - Return ONLY the JSON object, no markdown, no code block"""
