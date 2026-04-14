@@ -20,6 +20,23 @@ from backend.services.cli_executor import run_cli
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
 
+# Shell injection characters that must never appear in any command
+_FORBIDDEN_CHARS = [";", "&&", "|", "`", "$(", ">", "<"]
+
+
+def is_valid_command(command: str) -> bool:
+    """
+    Check that a command contains no shell injection or chaining characters.
+
+    Args:
+        command: AWS CLI command string to validate.
+
+    Returns:
+        bool: True if command is clean, False if any forbidden pattern found.
+    """
+    forbidden = [";", "&&", "|"]
+    return not any(f in command for f in forbidden)
+
 
 def execute_plan(steps: list[dict], remediation_actions: list[dict] | None = None) -> dict:
     """
@@ -100,8 +117,11 @@ def execute_approved(actions: list[dict]) -> dict:
     """
     Execute remediation actions after explicit user approval.
 
-    Each action is re-validated against safe_commands before execution —
-    approval does not bypass the safety check.
+    Validation layers (in order):
+      1. Command must start with "aws "
+      2. Command must pass is_valid_command() — no shell injection chars
+      3. Command must pass is_safe() — must match safe command prefix list
+      4. Command must not pass is_blocked() — no destructive keywords
 
     Args:
         actions: List of {"description", "command", "risk"} dicts,
@@ -130,15 +150,35 @@ def execute_approved(actions: list[dict]) -> dict:
 
         base = {"description": description, "command": command, "risk": risk}
 
-        # Re-validate even after approval
+        # Layer 1 — must be an AWS CLI command
         if not command.startswith("aws "):
-            executed.append({**base, "result": "Skipped: not a valid AWS CLI command.", "success": False})
+            executed.append({**base,
+                "result": "Rejected: not a valid AWS CLI command.",
+                "success": False})
             continue
 
-        if is_blocked(command) or not is_safe(command):
-            executed.append({**base, "result": "Blocked: command failed safety re-validation.", "success": False})
+        # Layer 2 — no shell injection or chaining characters
+        if not is_valid_command(command):
+            executed.append({**base,
+                "result": "Rejected: command contains forbidden characters (;, &&, |).",
+                "success": False})
             continue
 
+        # Layer 3 — must match safe command prefix list
+        if not is_safe(command):
+            executed.append({**base,
+                "result": "Rejected: command is not in the approved safe command list.",
+                "success": False})
+            continue
+
+        # Layer 4 — must not contain destructive keywords
+        if is_blocked(command):
+            executed.append({**base,
+                "result": "Rejected: command contains a blocked destructive keyword.",
+                "success": False})
+            continue
+
+        # All checks passed — execute
         raw = run_cli(command)
         executed.append({
             **base,
