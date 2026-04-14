@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.services import ai_service, cli_executor, formatter
+from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
 
 load_dotenv()
@@ -122,13 +123,17 @@ def chat(request: ChatRequest):
             raw=result["output"] or None,
         )
 
-    # Step 4 — Format
+    # Step 4 — Sanitize before sending to AI
+    sanitized = sanitize_aws_output(result["output"])
+    _log("INFO", f"Output sanitized ({len(result['output'])} → {len(sanitized)} chars)")
+
+    # Step 5 — Format
     try:
-        answer = formatter.format_result(result["output"])
+        answer = formatter.format_result(sanitized)
         _log("INFO", "Response formatted successfully")
     except Exception as e:
         _log("ERROR", f"Formatter failed: {e}")
-        answer = result["output"]  # fallback to raw output
+        answer = sanitized  # fallback to sanitized output
 
     return ChatResponse(
         command=command,
