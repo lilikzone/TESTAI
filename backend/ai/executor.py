@@ -1,136 +1,123 @@
 """
-AI Executor — Executes planned AWS CLI commands with approval gate for remediation.
+Enterprise-Grade Execution Engine — AI Cloud Operator
 
-Two modes:
-  1. execute_plan(steps)
-     — Runs read/describe commands immediately.
-     — Returns {"steps": [...]} with results.
+Execution policy (in order):
+  1. MAX_ACTIONS guard       — prevent blast radius
+  2. BLOCK CHECK             — hard stop on blocked keywords
+  3. SAFE CHECK              — must be in safe command list
+  4. RISK CLASSIFICATION     — HIGH / MEDIUM / LOW
+  5. HIGH RISK gate          — always REQUIRES_APPROVAL, never auto-execute
+  6. DRY-RUN VALIDATION      — if supported, validate IAM permission first
+  7. NO DRY-RUN + MEDIUM     — BLOCKED (cannot safely validate)
+  8. REAL EXECUTION          — only LOW risk or MEDIUM with dry-run passed
+  9. AUDIT LOG               — every outcome recorded
 
-  2. execute_plan(steps, remediation_actions)
-     — If remediation actions are present, does NOT execute them.
-     — Returns {"needs_approval": True, "actions": [...]} for user review.
-
-  3. execute_approved(actions)
-     — Called only when user explicitly says "approve".
-     — Validates each action against safe_commands before executing.
-     — Attempts dry-run first if the command supports it.
+Output format (always structured):
+  {
+    "command": "...",
+    "status":  "SUCCESS | FAILED | BLOCKED | REJECTED | REQUIRES_APPROVAL",
+    "risk":    "LOW | MEDIUM | HIGH",
+    "reason":  "...",
+    "output":  "..."
+  }
 """
 
-from backend.ai.safe_commands import is_blocked, is_safe
+import hashlib
+
 from backend.ai.audit import log_action
 from backend.ai.rbac import check_permission
+from backend.ai.risk import classify
+from backend.ai.safe_commands import is_blocked, is_safe
 from backend.services.cli_executor import run_cli
 from backend.services.sanitizer import sanitize_aws_output
 from backend.utils.security import is_safe_command
-import hashlib
 
-# Shell injection characters that must never appear in any command
-_FORBIDDEN_CHARS = [";", "&&", "|", "`", "$(", ">", "<"]
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
 
-# EC2 commands that support --dry-run flag
-# AWS only supports --dry-run on a specific subset of EC2 mutating operations
-_DRY_RUN_SUPPORTED = {
-    "aws ec2 start-instances",
-    "aws ec2 stop-instances",
-    "aws ec2 reboot-instances",
-    "aws ec2 terminate-instances",
-    "aws ec2 run-instances",
-    "aws ec2 create-image",
-    "aws ec2 create-snapshot",
-    "aws ec2 create-volume",
-    "aws ec2 attach-volume",
-    "aws ec2 detach-volume",
-    "aws ec2 associate-address",
-    "aws ec2 disassociate-address",
-    "aws ec2 create-tags",
-    "aws ec2 delete-tags",
-    "aws ec2 modify-instance-attribute",
-}
+MAX_ACTIONS = 5
+
+DRY_RUN_SUPPORTED = [
+    "start-instances",
+    "stop-instances",
+    "run-instances",
+    "create-tags",
+    "create-image",
+    "create-snapshot",
+    "reboot-instances",
+    "terminate-instances",
+    "associate-address",
+    "disassociate-address",
+    "modify-instance-attribute",
+]
 
 
-def _supports_dry_run(command: str) -> bool:
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def is_valid_command(command: str) -> bool:
+    """Return True if command contains no shell injection characters."""
+    forbidden = [";", "&&", "|"]
+    return not any(f in command for f in forbidden)
+
+
+def supports_dry_run(command: str) -> bool:
     """Return True if the command supports AWS --dry-run flag."""
-    return any(command.startswith(prefix) for prefix in _DRY_RUN_SUPPORTED)
+    return any(cmd in command for cmd in DRY_RUN_SUPPORTED)
 
 
 def _dry_run(command: str) -> tuple[bool, str]:
     """
-    Attempt a dry-run of the command by appending --dry-run.
+    Attempt dry-run. Returns (would_succeed, message).
 
-    AWS dry-run returns exit code 255 with error code DryRunOperation
-    if the user HAS permission (meaning the real call would succeed).
+    AWS returns DryRunOperation (exit 255) when permission check passes.
+    UnauthorizedOperation means no IAM permission.
     Any other error means the real call would also fail.
-
-    Returns:
-        tuple[bool, str]: (would_succeed, message)
     """
-    dry_command = f"{command} --dry-run"
-    result = run_cli(dry_command)
+    result = run_cli(f"{command} --dry-run")
+    combined = (result.get("error") or "") + (result.get("output") or "")
 
-    # DryRunOperation = permission check passed, real call would succeed
-    if "DryRunOperation" in (result.get("error") or "") or \
-       "DryRunOperation" in (result.get("output") or ""):
-        return True, "Dry-run passed: permission check succeeded."
-
-    # UnauthorizedOperation = no permission
-    if "UnauthorizedOperation" in (result.get("error") or ""):
-        return False, "Dry-run failed: insufficient IAM permissions for this action."
-
-    # Other error — real execution would also fail
-    error_msg = result.get("error") or result.get("output") or "Unknown dry-run error."
-    return False, f"Dry-run failed: {error_msg[:200]}"
+    if "DryRunOperation" in combined:
+        return True, "Dry-run passed: IAM permission check succeeded."
+    if "UnauthorizedOperation" in combined:
+        return False, "Dry-run failed: insufficient IAM permissions."
+    return False, f"Dry-run failed: {combined[:200]}"
 
 
-def is_valid_command(command: str) -> bool:
-    """
-    Check that a command contains no shell injection or chaining characters.
+def _make_result(command: str, status: str, risk: str = "LOW",
+                 reason: str = "", output: str = "") -> dict:
+    """Build a standardized result dict."""
+    return {
+        "command": command,
+        "status":  status,
+        "risk":    risk,
+        "reason":  reason,
+        "output":  output,
+    }
 
-    Args:
-        command: AWS CLI command string to validate.
 
-    Returns:
-        bool: True if command is clean, False if any forbidden pattern found.
-    """
-    forbidden = [";", "&&", "|"]
-    return not any(f in command for f in forbidden)
-
+# --------------------------------------------------------------------------- #
+# execute_plan — read/describe pipeline (no approval needed)
+# --------------------------------------------------------------------------- #
 
 def execute_plan(steps: list[dict], remediation_actions: list[dict] | None = None) -> dict:
     """
     Execute an ordered list of read/describe AWS CLI commands.
 
-    If remediation_actions are provided, they are NOT executed — instead
-    the function returns a pending approval response.
+    If remediation_actions are provided, returns a pending approval response
+    without executing anything.
 
     Args:
         steps:               List of {"step", "action"} dicts from planner.
-        remediation_actions: Optional list of {"description", "command", "risk"}
-                             dicts from remediator. If present, triggers approval gate.
+        remediation_actions: If present, triggers approval gate.
 
     Returns:
-        dict — one of two shapes:
-
-        Normal execution:
-            {
-                "steps": [
-                    {"step": 1, "command": "...", "result": "...", "success": True}
-                ]
-            }
-
-        Pending approval (when remediation_actions provided):
-            {
-                "needs_approval": True,
-                "actions": [
-                    {"description": "...", "command": "...", "risk": "low"}
-                ]
-            }
+        {"steps": [...]}  or  {"needs_approval": True, "actions": [...]}
     """
-    # Approval gate — return without executing if remediation is pending
     if remediation_actions:
-        return {
-            "needs_approval": True,
-            "actions": remediation_actions,
-        }
+        return {"needs_approval": True, "actions": remediation_actions}
 
     executed = []
 
@@ -138,158 +125,185 @@ def execute_plan(steps: list[dict], remediation_actions: list[dict] | None = Non
         step_num = item.get("step", len(executed) + 1)
         command  = item.get("action", "").strip()
 
-        # Guard: skip non-AWS commands
         if not command.startswith("aws "):
             executed.append({
-                "step":    step_num,
-                "command": command,
-                "result":  "Skipped: not a valid AWS CLI command.",
-                "success": False,
+                "step": step_num, "command": command,
+                "result": "Skipped: not a valid AWS CLI command.", "success": False,
             })
             continue
 
-        # Guard: block destructive commands
         if not is_safe_command(command):
             executed.append({
-                "step":    step_num,
-                "command": command,
-                "result":  "Blocked: command contains a destructive keyword.",
-                "success": False,
+                "step": step_num, "command": command,
+                "result": "Blocked: command contains a destructive keyword.", "success": False,
             })
             continue
 
-        raw = run_cli(command)
+        raw         = run_cli(command)
         result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
 
-        log_action(
-            user="system",
-            command=command,
-            result=result_text,
-            status="success" if raw["success"] else "failed",
-        )
+        log_action(user="system", command=command, result=result_text,
+                   status="success" if raw["success"] else "failed")
 
         executed.append({
-            "step":    step_num,
-            "command": command,
-            "result":  result_text,
-            "success": raw["success"],
+            "step": step_num, "command": command,
+            "result": result_text, "success": raw["success"],
         })
 
     return {"steps": executed}
 
 
+# --------------------------------------------------------------------------- #
+# execute_approved — enterprise execution engine
+# --------------------------------------------------------------------------- #
+
 def execute_approved(actions: list[dict], user: str = "system", role: str = "operator") -> dict:
     """
-    Execute remediation actions after explicit user approval.
+    Enterprise-grade execution of approved remediation actions.
 
-    Validation layers (in order):
-      1. Command must start with "aws "
-      2. Command must pass is_valid_command() — no shell injection chars
-      3. Command must pass is_safe() — must match safe command prefix list
-      4. Command must not pass is_blocked() — no destructive keywords
+    Full validation pipeline per action:
+      -1. RBAC check
+       0. Hash tamper detection
+       1. MAX_ACTIONS blast-radius guard
+       2. Shell injection check
+       3. BLOCK CHECK (hard stop)
+       4. SAFE CHECK
+       5. RISK CLASSIFICATION
+       6. HIGH RISK → REQUIRES_APPROVAL (never auto-execute)
+       7. DRY-RUN (if supported) → fail if permission denied
+       8. NO DRY-RUN + MEDIUM → BLOCKED
+       9. REAL EXECUTION
+      10. AUDIT LOG
 
     Args:
-        actions: List of {"description", "command", "risk"} dicts,
-                 typically from remediator.generate_remediation().
+        actions: List of signed action dicts from remediator.
+        user:    Identity of the approving user.
+        role:    Role of the user (viewer / operator / admin).
 
     Returns:
-        dict:
-            {
-                "steps": [
-                    {
-                        "description": "...",
-                        "command":     "...",
-                        "risk":        "low",
-                        "result":      "...",
-                        "success":     True
-                    }
-                ]
-            }
+        {"steps": [{"command", "status", "risk", "reason", "output"}, ...]}
     """
-    executed = []
+    results = []
+
+    # Blast-radius guard
+    if len(actions) > MAX_ACTIONS:
+        return {
+            "steps": [_make_result(
+                command="(batch)",
+                status="BLOCKED",
+                reason=f"Too many actions: {len(actions)} exceeds MAX_ACTIONS={MAX_ACTIONS}.",
+            )]
+        }
 
     for action in actions:
-        description = action.get("description", "")
         command     = action.get("command", "").strip()
-        risk        = action.get("risk", "unknown")
+        description = action.get("description", "")
+        risk_hint   = action.get("risk", "")
 
-        base = {"description": description, "command": command, "risk": risk,
-                "action_id": action.get("action_id", ""), "hash": action.get("hash", "")}
-
-        # Layer -1 — RBAC check
-        allowed, reason = check_permission(role, action)
+        # ------------------------------------------------------------------ #
+        # Layer -1: RBAC
+        # ------------------------------------------------------------------ #
+        allowed, rbac_reason = check_permission(role, action)
         if not allowed:
-            msg = f"Rejected: {reason}"
+            msg = f"Rejected by RBAC: {rbac_reason}"
             log_action(user=user, command=command, result=msg, status="rejected",
                        action_id=action.get("action_id", ""), hash=action.get("hash", ""))
-            executed.append({**base, "result": msg, "success": False})
+            results.append(_make_result(command, "REJECTED", risk_hint, msg))
             continue
 
-        # Layer 0 — verify hash matches command (tamper detection)
+        # ------------------------------------------------------------------ #
+        # Layer 0: Hash tamper detection
+        # ------------------------------------------------------------------ #
         expected_hash = action.get("hash", "")
         if expected_hash:
-            actual_hash = hashlib.sha256(command.encode()).hexdigest()
-            if actual_hash != expected_hash:
+            if hashlib.sha256(command.encode()).hexdigest() != expected_hash:
                 msg = "Rejected: hash mismatch — command may have been tampered with."
                 log_action(user=user, command=command, result=msg, status="rejected",
                            action_id=action.get("action_id", ""), hash=expected_hash)
-                executed.append({**base, "result": msg, "success": False})
+                results.append(_make_result(command, "REJECTED", risk_hint, msg))
                 continue
 
-        # Layer 1 — must be an AWS CLI command
-        if not command.startswith("aws "):
-            executed.append({**base,
-                "result": "Rejected: not a valid AWS CLI command.",
-                "success": False})
-            continue
-
-        # Layer 2 — no shell injection or chaining characters
+        # ------------------------------------------------------------------ #
+        # Layer 1: Shell injection check
+        # ------------------------------------------------------------------ #
         if not is_valid_command(command):
-            executed.append({**base,
-                "result": "Rejected: command contains forbidden characters (;, &&, |).",
-                "success": False})
+            msg = "Rejected: command contains forbidden characters (;, &&, |)."
+            log_action(user=user, command=command, result=msg, status="rejected")
+            results.append(_make_result(command, "REJECTED", risk_hint, msg))
             continue
 
-        # Layer 3 — must match safe command prefix list
-        if not is_safe(command):
-            executed.append({**base,
-                "result": "Rejected: command is not in the approved safe command list.",
-                "success": False})
-            continue
-
-        # Layer 4 — must not contain destructive keywords
+        # ------------------------------------------------------------------ #
+        # Layer 2: BLOCK CHECK — hard stop
+        # ------------------------------------------------------------------ #
         if is_blocked(command):
-            executed.append({**base,
-                "result": "Rejected: command contains a blocked destructive keyword.",
-                "success": False})
+            msg = "Blocked: command contains a destructive keyword."
+            log_action(user=user, command=command, result=msg, status="blocked")
+            results.append(_make_result(command, "BLOCKED", risk_hint, msg))
             continue
 
-        # All checks passed — attempt dry-run if supported
-        if _supports_dry_run(command):
+        # ------------------------------------------------------------------ #
+        # Layer 3: SAFE CHECK
+        # ------------------------------------------------------------------ #
+        if not is_safe(command):
+            msg = "Rejected: command is not in the approved safe command list."
+            log_action(user=user, command=command, result=msg, status="rejected")
+            results.append(_make_result(command, "REJECTED", risk_hint, msg))
+            continue
+
+        # ------------------------------------------------------------------ #
+        # Layer 4: RISK CLASSIFICATION
+        # ------------------------------------------------------------------ #
+        risk = classify(command)
+
+        # ------------------------------------------------------------------ #
+        # Layer 5: HIGH RISK → always require approval, never auto-execute
+        # ------------------------------------------------------------------ #
+        if risk == "HIGH":
+            msg = "High-risk command requires explicit admin approval before execution."
+            log_action(user=user, command=command, result=msg, status="requires_approval")
+            results.append(_make_result(command, "REQUIRES_APPROVAL", risk, msg))
+            continue
+
+        # ------------------------------------------------------------------ #
+        # Layer 6: DRY-RUN VALIDATION (if supported)
+        # ------------------------------------------------------------------ #
+        if supports_dry_run(command):
             dry_ok, dry_msg = _dry_run(command)
             if not dry_ok:
                 log_action(user=user, command=command, result=dry_msg, status="dry-run-failed",
-                           action_id=action.get("action_id", ""), hash=action.get("hash", ""))
-                executed.append({**base, "result": dry_msg, "success": False})
+                           action_id=action.get("action_id", ""))
+                results.append(_make_result(command, "FAILED", risk, dry_msg))
                 continue
 
-        # Real execution
-        raw = run_cli(command)
-        result_text = sanitize_aws_output(raw["output"]) if raw["success"] else raw["error"]
+        # ------------------------------------------------------------------ #
+        # Layer 7: NO DRY-RUN SUPPORT + MEDIUM RISK → BLOCKED
+        # ------------------------------------------------------------------ #
+        elif risk == "MEDIUM":
+            msg = "Blocked: medium-risk command has no dry-run support — cannot safely validate."
+            log_action(user=user, command=command, result=msg, status="blocked")
+            results.append(_make_result(command, "BLOCKED", risk, msg))
+            continue
 
+        # ------------------------------------------------------------------ #
+        # Layer 8: REAL EXECUTION
+        # ------------------------------------------------------------------ #
+        raw         = run_cli(command)
+        output_text = sanitize_aws_output(raw["output"]) if raw["success"] else ""
+        error_text  = raw.get("error", "") if not raw["success"] else ""
+        status      = "SUCCESS" if raw["success"] else "FAILED"
+        reason      = error_text if not raw["success"] else ""
+
+        # ------------------------------------------------------------------ #
+        # Layer 9: AUDIT LOG
+        # ------------------------------------------------------------------ #
         log_action(
-            user=user,
-            command=command,
-            result=result_text,
-            status="success" if raw["success"] else "failed",
+            user=user, command=command,
+            result=output_text or error_text,
+            status=status.lower(),
             action_id=action.get("action_id", ""),
             hash=action.get("hash", ""),
         )
 
-        executed.append({
-            **base,
-            "result":  result_text,
-            "success": raw["success"],
-        })
+        results.append(_make_result(command, status, risk, reason, output_text))
 
-    return {"steps": executed}
+    return {"steps": results}
