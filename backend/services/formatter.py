@@ -49,10 +49,14 @@ def format_result(raw_output: str) -> str:
         raise EnvironmentError("GEMINI_API_KEY is not set in environment variables.")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-pro"))
+    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
 
     prompt = _FORMAT_RESULT_PROMPT.format(raw_output=truncated)
-    response = model.generate_content(prompt)
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini failed to format the output: {str(e)}")
+
     return response.text.strip()
 
 

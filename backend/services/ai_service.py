@@ -35,7 +35,7 @@ def _get_client() -> genai.GenerativeModel:
     if not api_key:
         raise EnvironmentError("GEMINI_API_KEY is not set in environment variables.")
     genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     return genai.GenerativeModel(model_name)
 
 
@@ -69,7 +69,11 @@ def generate_cli(user_input: str) -> str:
     """
     model = _get_client()
     prompt = f"{_GENERATE_CLI_SYSTEM_PROMPT}\n\nUser request: {user_input}"
-    response = model.generate_content(prompt)
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini failed to generate a response: {str(e)}")
+
     command = _clean_command(response.text)
 
     if not command:
@@ -94,7 +98,10 @@ def translate(query: str, aws_region: str, account_id: str = "unknown") -> str:
         account_id=account_id,
     )
     model = _get_client()
-    response = model.generate_content(prompt)
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini failed to translate query: {str(e)}")
     return response.text.strip()
 
 
@@ -112,5 +119,8 @@ def format_output(raw_output: str, original_query: str, aws_service: str = "aws"
         raw_output=raw_output,
     )
     model = _get_client()
-    response = model.generate_content(prompt)
+    try:
+        response = model.generate_content(prompt)
+    except Exception as e:
+        raise RuntimeError(f"Gemini failed to format output: {str(e)}")
     return response.text.strip()
