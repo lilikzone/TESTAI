@@ -11,11 +11,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from backend.services import ai_service, cli_executor, formatter
-from backend.services.sanitizer import sanitize_aws_output
+from backend.services import formatter
 from backend.services.planner import plan_actions
 from backend.services.orchestrator import run_ai_agent
-from backend.utils.security import is_safe_command
+from backend.ai.planner import create_plan
+from backend.ai.executor import execute_plan
 
 load_dotenv()
 
@@ -51,7 +51,6 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    command: str | None
     answer: str
 
 
@@ -95,70 +94,44 @@ def chat(request: ChatRequest):
     Main pipeline endpoint.
 
     Flow:
-      1. Receive message from user
-      2. Generate AWS CLI command via Gemini (ai_service.generate_cli)
-      3. Validate command safety (security.is_safe_command)
-      4. Execute command via AWS CLI (cli_executor.run_cli)
-      5. Format output into human-readable answer (formatter.format_result)
+      1. planner  — convert user message into ordered AWS CLI steps
+      2. executor — run each step, collect sanitized results
+      3. formatter — correlate all results into a unified analysis
     """
     message = request.message.strip()
     _log("INFO", f"Received message: {message}")
 
-    # Step 1 — Generate CLI command
+    # Step 1 — Plan
     try:
-        command = ai_service.generate_cli(message)
-        _log("INFO", f"Generated command: {command}")
-    except EnvironmentError as e:
-        _log("ERROR", f"Environment error: {e}")
-        return ChatResponse(command=None, answer=str(e))
-    except ValueError as e:
-        _log("WARN", f"AI returned unexpected output: {e}")
-        return ChatResponse(command=None, answer=str(e))
+        plan = create_plan(message)
+        _log("INFO", f"Plan created: {len(plan)} steps")
     except Exception as e:
-        _log("ERROR", f"AI translation failed: {e}")
-        return ChatResponse(command=None, answer=f"Failed to generate CLI command: {str(e)}")
+        _log("ERROR", f"Planner failed: {e}")
+        return ChatResponse(answer=f"Gagal membuat rencana eksekusi: {str(e)}")
 
-    # Step 2 — Security check
-    if not is_safe_command(command):
-        _log("WARN", f"Blocked unsafe command: {command}")
-        return ChatResponse(
-            command=command,
-            answer=(
-                "⚠️ Command requires approval before execution.\n"
-                f"Detected potentially destructive operation in: `{command}`\n"
-                "Please review and confirm with your administrator."
-            ),
-        )
-
-    _log("INFO", f"Command passed security check (risk: safe)")
-
-    # Step 3 — Execute
-    result = cli_executor.run_cli(command)
-    _log("INFO", f"Execution success={result['success']}")
-
-    if not result["success"]:
-        _log("WARN", f"CLI execution error: {result['error']}")
-        return ChatResponse(
-            command=command,
-            answer=f"AWS CLI execution failed:\n{result['error']}",
-        )
-
-    # Step 4 — Sanitize before sending to AI
-    sanitized = sanitize_aws_output(result["output"])
-    _log("INFO", f"Output sanitized ({len(result['output'])} → {len(sanitized)} chars)")
-
-    # Step 5 — Format
+    # Step 2 — Execute
     try:
-        answer = formatter.format_result(sanitized)
+        results = execute_plan(plan)
+        success_count = sum(1 for s in results["steps"] if s["success"])
+        _log("INFO", f"Executed {len(results['steps'])} steps, {success_count} succeeded")
+    except Exception as e:
+        _log("ERROR", f"Executor failed: {e}")
+        return ChatResponse(answer=f"Gagal mengeksekusi perintah: {str(e)}")
+
+    # Step 3 — Format
+    try:
+        answer = formatter.format_steps(results["steps"])
         _log("INFO", "Response formatted successfully")
     except Exception as e:
         _log("ERROR", f"Formatter failed: {e}")
-        answer = sanitized  # fallback to sanitized output
+        # Fallback: return raw step results
+        fallback = "\n".join(
+            f"Step {s['step']}: {s['command']}\n{s['result']}"
+            for s in results["steps"]
+        )
+        answer = fallback
 
-    return ChatResponse(
-        command=command,
-        answer=answer,
-    )
+    return ChatResponse(answer=answer)
 
 @app.post("/ai/plan", response_model=PlanResponse)
 def plan(request: PlanRequest):
